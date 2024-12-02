@@ -954,26 +954,16 @@ _ThreadSetupMainThreadUserStack(
     ASSERT(Process->FullCommandLine != NULL);
     ASSERT(Process->NumberOfArguments > 0);
 
-    LOGP("Initializing main thread user stack with initial stack at %p\n", InitialStack);
+    LOGP("Initializing main thread user stack.\n");
 
     STATUS status = STATUS_SUCCESS;
-    char** argv = NULL;
-    PVOID BaseStackKernelAddress = NULL;
+    char* argv[40] = { 0 }; // Static allocation to avoid dynamic memory issues.
 
-    // step 1: Parse and validate arguments
-    argv = (char**)ExAllocatePoolWithTag(
-        PoolAllocateZeroMemory,
-        Process->NumberOfArguments * sizeof(char*),
-        HEAP_PROCESS_TAG,
-        0
-    );
-    if (argv == NULL) {
-        LOGP_ERROR("Failed to allocate memory for argv array\n");
-        return STATUS_HEAP_INSUFFICIENT_RESOURCES;
-    }
-
+    // Step 1: Parse and validate arguments
     char* start = Process->FullCommandLine;
     DWORD index = 0;
+
+    LOGP("Parsing command line.\n");
 
     while (*start != '\0' && index < Process->NumberOfArguments) {
         while (*start == ' ') start++; // Skip spaces
@@ -987,8 +977,9 @@ _ThreadSetupMainThreadUserStack(
         }
     }
 
-    // step 2: Map user buffer to kernel space
-    status = MmuGetSystemVirtualAddressForUserBuffer(
+    // Step 2: Map user buffer to kernel space
+    PVOID BaseStackKernelAddress = NULL;
+    MmuGetSystemVirtualAddressForUserBuffer(
         (PVOID)PtrDiff(InitialStack, STACK_DEFAULT_SIZE),
         STACK_DEFAULT_SIZE,
         PAGE_RIGHTS_READWRITE,
@@ -996,50 +987,74 @@ _ThreadSetupMainThreadUserStack(
         &BaseStackKernelAddress
     );
 
-    PVOID StackIterator = BaseStackKernelAddress;
-    StackIterator = PtrOffset(BaseStackKernelAddress, STACK_DEFAULT_SIZE);
+    PVOID StackIterator = PtrOffset(BaseStackKernelAddress, STACK_DEFAULT_SIZE);
+    LOGP("Stack initialized. BaseStackKernelAddress set.\n");
+
     // Step 3: Push arguments onto the stack
-    for (int i = 0; i < (int)Process->NumberOfArguments ; ++i) {
+    //Argument N-1 to Argument 0
+    for (int i = Process->NumberOfArguments - 1; i >= 0; --i) {
+        WORD argLen = (WORD)(strlen(argv[i]) + 1); // Include null terminator
+        StackIterator = (PVOID)((char*)StackIterator - argLen); // Move the stack pointer
+        memcpy(StackIterator, argv[i], argLen);
+        // Ensure alignment to 8 bytes
+        //QWORD Padding8 = (QWORD)StackIterator % 8;
+        //if (Padding8 != 0) {
+        //    StackIterator = (PVOID)((char*)StackIterator - (8 - Padding8)); // Apply padding
+        //}
+    }
+    // argv[N-1] = &(Argument N-1)  to argv[0] = &(Argument 0) 
+    for (int i = Process->NumberOfArguments - 1; i >= 0; --i) {
         StackIterator = (PVOID)((char*)StackIterator - sizeof(QWORD));
         argv[i] = StackIterator;
     }
+    // Align stack to 8 bytes
     QWORD Alignment8 = (QWORD)StackIterator % 8;
-    StackIterator = (PVOID)((char*)StackIterator - (Alignment8));
+    if (Alignment8 != 0) {
+        StackIterator = (PVOID)((char*)StackIterator - Alignment8);
+    }
+
+    // Align stack to 16 bytes if necessary
     QWORD Alignment16 = (QWORD)StackIterator % 16;
     if (Alignment16 == 0) {
-        StackIterator = (PVOID)((char*)StackIterator - (QWORD)8);
-
+        StackIterator = (PVOID)((char*)StackIterator - (DWORD)8);
     }
-    // Step 4, push shadow stack and argv argc
 
-    // dummy shadow space  0xDEADBEEF
+
+    // shadow stack
     for (int i = 0; i < 2; ++i) {
         StackIterator = (PVOID)((char*)StackIterator - sizeof(QWORD));
-        *(QWORD*)StackIterator = 0xDEADBEEF; // Dummy placeholder
+        *(QWORD*)StackIterator = 0xDEADBEEF; // Dummy shadow space
+        LOGP("Pushed shadow stack dummy value.\n");
     }
-
-    // argv pointer
-    StackIterator = (PVOID)((char*)StackIterator - sizeof(QWORD)); // Decrement stack pointer
-    StackIterator = argv; // Store the address of the argv array
-
-    // argc (number of arguments)
-    StackIterator = (PVOID)((char*)StackIterator - sizeof(QWORD));
+    // argv
+    StackIterator = (PVOID)((char*)StackIterator - sizeof(char*));
+    StackIterator = argv;
+    LOGP("Pushed argv value.\n");
+    // argc
+    StackIterator = (PVOID)((char*)StackIterator - sizeof(DWORD));
     *(DWORD*)StackIterator = (DWORD)Process->NumberOfArguments;
-
-    // dummy address DEADC0DE
+    LOGP("Pushed argc value.\n");
+    // Dummy RA
     StackIterator = (PVOID)((char*)StackIterator - sizeof(QWORD));
     *(QWORD*)StackIterator = 0xDEADC0DE;
+    LOGP("Pushed dummy return address.\n");
 
-    // update resulting stack pointer
-    *ResultingStack = PtrOffset(BaseStackKernelAddress, STACK_DEFAULT_SIZE);
+    // Update resulting stack pointer
+    *ResultingStack = (PVOID)((char*)InitialStack - ((PBYTE)StackIterator - (PBYTE)BaseStackKernelAddress));
+    LOGP("Resulting stack pointer updated.\n");
 
-    //ExFreePoolWithTag(argv, HEAP_PROCESS_TAG);
-    LOGP("Main thread user stack successfully set up at %p\n", *ResultingStack);
-    // Free temporary allocations
+
+    // free BaseStackKernelAddress
     MmuFreeSystemVirtualAddressForUserBuffer(BaseStackKernelAddress);
+    LOGP("Freed BaseStackKernelAddress\n");
 
+
+
+    LOGP("Main thread user stack successfully set up.\n");
     return status;
 }
+
+
 
 
 
